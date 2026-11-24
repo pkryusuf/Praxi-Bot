@@ -663,6 +663,15 @@ impl Run<'_> {
                     }
                     "session/request_permission" => {
                         let tc = &v["params"]["toolCall"];
+                        if is_kimi_question(self.nt.driver, tc) {
+                            let outcome = acp_outcome(&v["params"]["options"], false, false);
+                            send(
+                                stdin,
+                                json!({"jsonrpc":"2.0","id":id,"result":{"outcome":outcome}}),
+                            )
+                            .await?;
+                            continue;
+                        }
                         let title = tc["title"].as_str().unwrap_or("tool");
                         let kind = tc["kind"].as_str().unwrap_or(title);
                         let input = if tc["rawInput"].is_null() {
@@ -794,6 +803,14 @@ async fn send_prompt(
     .await
 }
 
+/// Kimi Code asks its `AskUserQuestion` questions through `session/request_permission`
+/// when the client offers no form elicitation: one `allow_once` option per answer plus a
+/// `reject_once` "Skip". An approval card cannot show which answer it would pick, and
+/// approving (or Full) would always send the first one, so Praxi answers Skip instead.
+fn is_kimi_question(driver: Driver, tool_call: &Value) -> bool {
+    driver == Driver::Kimi && tool_call["title"] == "AskUserQuestion"
+}
+
 /// ACP permission answer. Below Full only the agent's "once" options are used, so a
 /// single approval never becomes a remembered grant; without one the request is cancelled.
 fn acp_outcome(options: &Value, allow: bool, full: bool) -> Value {
@@ -857,6 +874,24 @@ fn codex_card(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn kimi_questions_are_skipped_instead_of_answered_with_the_first_choice() {
+        // `questionItemToPermissionOptions` of `kimi acp` 2.7.3.
+        let options = json!([
+            {"optionId":"q0_opt_0","name":"Yes","kind":"allow_once"},
+            {"optionId":"q0_opt_1","name":"No","kind":"allow_once"},
+            {"optionId":"q0_skip","name":"Skip","kind":"reject_once"}]);
+        let question = json!({"toolCallId":"t","title":"AskUserQuestion"});
+        assert!(is_kimi_question(Driver::Kimi, &question));
+        assert_eq!(acp_outcome(&options, false, false)["optionId"], "q0_skip");
+        // Only Kimi's question prompt is answered this way; tool approvals still ask.
+        assert!(!is_kimi_question(Driver::Agy, &question));
+        assert!(!is_kimi_question(
+            Driver::Kimi,
+            &json!({"toolCallId":"t","title":"Shell"})
+        ));
+    }
 
     #[test]
     fn kimi_session_setup_uses_the_modes_kimi_acp_offers() {
